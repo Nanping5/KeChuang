@@ -1,0 +1,9 @@
+# 忽略 whisper 目录
+whisper/
+
+# 忽略 PyCharm/IntelliJ IDEA 配置
+.idea/
+
+# 忽略 Python 缓存文件
+__pycache__/
+*.py[cod]
