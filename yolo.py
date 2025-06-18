@@ -6,7 +6,7 @@ from queue import Queue
 from collections import deque
 from ultralytics import YOLO
 from handEyeCali import handEyeCalibration, useAffineMat
-from Basic01_dobot import ConnectRobot
+from connect import ConnectRobot
 import datetime
 
 def log(msg):
@@ -61,6 +61,11 @@ detecting.set()  # 初始允许检测
 
 center_history = deque(maxlen=5)  # 保存最近5帧中心点
 
+# 创建线程控制标志
+exit_flag = threading.Event()
+busy = False
+grab_queue = Queue(maxsize=1)  # 用于传递抓取任务
+
 def capture_frames(cap):
     """摄像头捕获线程"""
     while not exit_flag.is_set():
@@ -82,13 +87,29 @@ def capture_frames(cap):
 def process_frames():
     """YOLO处理线程"""
     last_detect_time = 0
-    detect_interval = 0.3  # 每1秒检测一次
+    detect_interval = 0.3  # 每0.3秒检测一次
     global center_history
     while not exit_flag.is_set():
         if frame_queue.empty():
             time.sleep(0.001)
             continue
         frame = frame_queue.get()
+        
+        # 即使不进行检测，也要传递原始帧以保持显示
+        if not detecting.is_set():
+            processed_frame = frame.copy()
+            fps_info = f"Capture: {capture_fps.get_fps():.1f} Process: {process_fps.get_fps():.1f} Display: {display_fps.get_fps():.1f}"
+            cv2.putText(processed_frame, fps_info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.putText(processed_frame, "Grabbing...", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            if result_queue.full():
+                try:
+                    result_queue.get_nowait()
+                except:
+                    pass
+            result_queue.put((processed_frame, None))
+            process_fps.update()
+            continue
+            
         # 检查检测开关
         if not detecting.is_set():
             # 只显示原始画面，不做检测
@@ -166,6 +187,23 @@ def process_frames():
         result_queue.put((processed_frame, move_pending if static_ready else None))
         process_fps.update()
 
+def safe_shutdown():
+    """安全关闭所有设备和进程"""
+    log("开始关闭程序...")
+    if move is not None:
+        try:
+            # 停止机械臂当前动作
+            move.Sync()
+            # 关闭所有IO设备
+            dashboard.DOExecute(1, 0)  # 关闭吸气
+            dashboard.DOExecute(2, 0)  # 关闭吹气
+            # 机械臂回到安全位置
+            move.MovJ(180, 0, 30, 0)
+            move.Sync()
+            log("机械臂已停止")
+        except Exception as e:
+            log(f"机械臂关闭过程出错：{e}")
+
 def display_loop():
     """显示线程"""
     while not exit_flag.is_set():
@@ -180,97 +218,70 @@ def display_loop():
         
         key = cv2.waitKey(1)
         if key & 0xFF == ord('q'):
+            log("检测到退出指令")
             exit_flag.set()
+            safe_shutdown()
             break
         
         handle_keyboard_events(key, move_pending)
 
 def handle_keyboard_events(key, move_pending):
     """处理键盘事件"""
-    if key == 27:  # ESC键
-        handle_esc_key()
-    elif key == 13 and move_pending is not None and move is not None:  # Enter键
-        handle_enter_key(move_pending)
-    
     # 自动抓取流程
-    if move_pending is not None and not busy:
-        handle_auto_grab(move_pending)
+    if move_pending is not None and not busy and grab_queue.empty():
+        grab_queue.put(move_pending)  # 将抓取任务加入队列
 
-def handle_esc_key():
-    """处理ESC键事件"""
-    log("检测到ESC，机械臂复位到(222, -3, 50, 0)")
-    if move is not None:
-        try:
-            result = move.MovJ(197, -250, 58, 0)
-            log(f"机械臂回复：{result}")
-            move.Sync()
-            result_io = dashboard.DOExecute(1, 0)
-            log(f"关闭吸气IO回复：{result_io}")
-            result_io = dashboard.DOExecute(2, 1)
-            log(f"吹气IO回复：{result_io}")
-            time.sleep(0.5)
-            result_io = dashboard.DOExecute(2, 0)
-            log(f"关闭吹气IO回复：{result_io}")
-        except Exception as e:
-            log(f"机械臂复位失败：{e}")
-
-def handle_enter_key(move_pending):
-    """处理Enter键事件"""
-    x1, y1, x2, y2 = move_pending
-    center_x = int((x1 + x2) / 2)
-    center_y = int((y1 + y2) / 2)
-    log(f"检测到目标中心像素: ({center_x}, {center_y})")
-    robot_x, robot_y = useAffineMat(aff_m, center_x, center_y)
-    robot_z = -131
-    robot_r = 0
-    log(f"变换后机械臂坐标: ({robot_x}, {robot_y}, {robot_z}, {robot_r})")
-    try:
-        result = move.MovJ(robot_x, robot_y, robot_z, robot_r)
-        log(f"机械臂回复：{result}")
-        move.Sync()
-        result_io = dashboard.DOExecute(1, 1)
-        log(f"吸气IO回复：{result_io}")
-    except Exception as e:
-        log(f"机械臂移动或吸气失败：{e}")
-
-def handle_auto_grab(move_pending):
-    """处理自动抓取"""
+def grab_worker():
+    """抓取线程的工作函数"""
     global busy
-    busy = True
-    detecting.clear()  # 暂停检测
-    x1, y1, x2, y2 = move_pending
-    center_x = int((x1 + x2) / 2)
-    center_y = int((y1 + y2) / 2)
-    log(f"检测到目标中心像素: ({center_x}, {center_y})")
-    robot_x, robot_y = useAffineMat(aff_m, center_x, center_y)
-    robot_z = -130
-    robot_r = 0
-    log(f"变换后机械臂坐标: ({robot_x}, {robot_y}, {robot_z}, {robot_r})")
-    try:
-        # 1. 移动到目标
-        result = move.MovJ(robot_x, robot_y, robot_z, robot_r)
-        log(f"机械臂回复：{result}")
-        move.Sync()
-        # 2. 吸气
-        result_io = dashboard.DOExecute(1, 1)
-        log(f"吸气IO回复：{result_io}")
-        time.sleep(1)
-        # 3. 移动到复位
-        result = move.MovJ(197, -250, 58, 0)
-        log(f"机械臂复位回复：{result}")
-        move.Sync()
-        # 4. 释放
-        result_io = dashboard.DOExecute(1, 0)
-        log(f"关闭吸气IO回复：{result_io}")
-        result_io = dashboard.DOExecute(2, 1)
-        log(f"吹气IO回复：{result_io}")
-        time.sleep(0.5)
-        result_io = dashboard.DOExecute(2, 0)
-        log(f"关闭吹气IO回复：{result_io}")
-    except Exception as e:
-        log(f"机械臂抓取或复位失败：{e}")
-    busy = False
-    detecting.set()  # 恢复检测
+    while not exit_flag.is_set():
+        try:
+            if grab_queue.empty():
+                time.sleep(0.001)
+                continue
+                
+            move_pending = grab_queue.get()
+            busy = True
+            detecting.clear()  # 只暂停检测，不影响显示
+            
+            x1, y1, x2, y2 = move_pending
+            center_x = int((x1 + x2) / 2)
+            center_y = int((y1 + y2) / 2)
+            log(f"检测到目标中心像素: ({center_x}, {center_y})")
+            robot_x, robot_y = useAffineMat(aff_m, center_x, center_y)
+            robot_z = -130
+            robot_r = 0
+            log(f"变换后机械臂坐标: ({robot_x}, {robot_y}, {robot_z}, {robot_r})")
+            try:
+                # 1. 移动到目标
+                result = move.MovJ(robot_x, robot_y, robot_z, robot_r)
+                log(f"机械臂回复：{result}")
+                move.Sync()
+                # 2. 吸气
+                result_io = dashboard.DOExecute(1, 1)
+                log(f"吸气IO回复：{result_io}")
+                time.sleep(1)
+                # 3. 移动到复位
+                result = move.MovJ(197, -250, 58, 0)
+                log(f"机械臂复位回复：{result}")
+                move.Sync()
+                # 4. 释放
+                result_io = dashboard.DOExecute(1, 0)
+                log(f"关闭吸气IO回复：{result_io}")
+                result_io = dashboard.DOExecute(2, 1)
+                log(f"吹气IO回复：{result_io}")
+                time.sleep(0.5)
+                result_io = dashboard.DOExecute(2, 0)
+                log(f"关闭吹气IO回复：{result_io}")
+            except Exception as e:
+                log(f"机械臂抓取或复位失败：{e}")
+            finally:
+                busy = False
+                detecting.set()  # 恢复检测
+        except Exception as e:
+            log(f"抓取线程发生错误: {e}")
+            busy = False
+            detecting.set()
 
 # 主程序
 cap = cv2.VideoCapture(0)
@@ -282,25 +293,28 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 cap.set(cv2.CAP_PROP_FPS, 30)  # 设置期望的帧率
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))  # 使用MJPG编码
 
-# 创建线程控制标志
-exit_flag = threading.Event()
-busy = False
-
 # 启动线程
 capture_thread = threading.Thread(target=capture_frames, args=(cap,))
 process_thread = threading.Thread(target=process_frames)
 display_thread = threading.Thread(target=display_loop)
+grab_thread = threading.Thread(target=grab_worker)  # 新增抓取线程
 
 capture_thread.start()
 process_thread.start()
 display_thread.start()
+grab_thread.start()  # 启动抓取线程
 
 try:
     # 等待线程结束
     capture_thread.join()
     process_thread.join()
     display_thread.join()
+    grab_thread.join()  # 等待抓取线程结束
 finally:
     # 清理资源
     exit_flag.set()
+    safe_shutdown()
     cv2.destroyAllWindows()
+    if cap is not None:
+        cap.release()
+    log("程序已安全退出")
