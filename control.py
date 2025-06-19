@@ -9,6 +9,80 @@ except ImportError:
     print("本脚本仅支持Windows平台。")
     sys.exit(1)
 
+# 机械臂限位参数
+X_MIN, X_MAX = 200, 400
+Y_MIN, Y_MAX = -200, 90
+STEP_XY = 10
+STEP_R = 5
+
+def get_pose(dashboard):
+    pose_str = dashboard.GetPose()
+    try:
+        match = re.search(r"\{([^}]*)\}", pose_str)
+        if not match:
+            raise ValueError("未找到内容")
+        pose_data = match.group(1)
+        x, y, z, r = [float(v) for v in pose_data.split(',')[:4]]
+        return x, y, z, r
+    except Exception as e:
+        return None
+
+def move_robot(direction, dashboard, move):
+    pose = get_pose(dashboard)
+    if pose is None:
+        return "获取位姿失败"
+    x, y, z, r = pose
+    # 限位判断
+    if not (X_MIN < x < X_MAX and Y_MIN < y < Y_MAX):
+        # 只允许回安全区方向移动
+        if direction == 'up' and y < Y_MIN:
+            move.RelMovL(0, STEP_XY, 0, 0)
+            return "上 (y+10)"
+        elif direction == 'down' and y > Y_MAX:
+            move.RelMovL(0, -STEP_XY, 0, 0)
+            return "下 (y-10)"
+        elif direction == 'left' and x > X_MAX:
+            move.RelMovL(-STEP_XY, 0, 0, 0)
+            return "左 (x-10)"
+        elif direction == 'right' and x < X_MIN:
+            move.RelMovL(STEP_XY, 0, 0, 0)
+            return "右 (x+10)"
+        else:
+            return "当前位置已超限，只允许回安全区方向移动！"
+    # 正常限位内
+    if direction == 'up':
+        if Y_MIN < y + STEP_XY < Y_MAX:
+            move.RelMovL(0, STEP_XY, 0, 0)
+            return "上 (y+10)"
+        else:
+            return "超出限位，禁止移动！"
+    elif direction == 'down':
+        if Y_MIN < y - STEP_XY < Y_MAX:
+            move.RelMovL(0, -STEP_XY, 0, 0)
+            return "下 (y-10)"
+        else:
+            return "超出限位，禁止移动！"
+    elif direction == 'left':
+        if X_MIN < x - STEP_XY < X_MAX:
+            move.RelMovL(-STEP_XY, 0, 0, 0)
+            return "左 (x-10)"
+        else:
+            return "超出限位，禁止移动！"
+    elif direction == 'right':
+        if X_MIN < x + STEP_XY < X_MAX:
+            move.RelMovL(STEP_XY, 0, 0, 0)
+            return "右 (x+10)"
+        else:
+            return "超出限位，禁止移动！"
+    elif direction == 'r+':
+        move.RelMovJ(0, 0, 0, STEP_R)
+        return "r+1"
+    elif direction == 'r-':
+        move.RelMovJ(0, 0, 0, -STEP_R)
+        return "r-1"
+    else:
+        return "未知指令"
+
 def main():
     dashboard, move, feed = ConnectRobot()
     dashboard.SpeedJ(30)
@@ -32,21 +106,21 @@ def main():
                 try:
                     match = re.search(r"\{([^}]*)\}", pose_str)
                     if not match:
-                        raise ValueError("未找到花括号内容")
+                        raise ValueError("未找到内容")
                     pose_data = match.group(1)
                     x, y, z, r = [float(v) for v in pose_data.split(',')[:4]]
                 except Exception as e:
                     print(f"GetPose解析失败: {pose_str}")
                     continue
                 # 先判断当前位置是否在限位内（只考虑x/y）
-                if not (200 < x < 400 and -200 < y < 86):
+                if not (200 < x < 400 and -200 < y < 90):
                     # 只允许回安全区方向移动
                     allowed = False
                     if key2 == b'H' and y < -200:
                         print("上 (y+1)")
                         move.RelMovL(0, step_xy, 0, 0)
                         allowed = True
-                    elif key2 == b'P' and y > 86:
+                    elif key2 == b'P' and y > 90:
                         print("下 (y-1)")
                         move.RelMovL(0, -step_xy, 0, 0)
                         allowed = True
@@ -58,11 +132,11 @@ def main():
                         print("右 (x+1)")
                         move.RelMovL(step_xy, 0, 0, 0)
                         allowed = True
-                    elif key2 == b'H' and y >= -200 and y < 86:
+                    elif key2 == b'H' and y >= -200 and y < 90:
                         print("上 (y+1)")
                         move.RelMovL(0, step_xy, 0, 0)
                         allowed = True
-                    elif key2 == b'P' and y > -200 and y <= 86:
+                    elif key2 == b'P' and y > -200 and y <= 90:
                         print("下 (y-1)")
                         move.RelMovL(0, -step_xy, 0, 0)
                         allowed = True
@@ -79,28 +153,28 @@ def main():
                     continue
                 if key2 == b'H':  # 上
                     new_y = y + step_xy
-                    if 200 < x < 400 and -200 < new_y < 86:
+                    if 200 < x < 400 and -200 < new_y < 90:
                         print("上 (y+1)")
                         move.RelMovL(0, step_xy, 0, 0)
                     else:
                         print("超出限位，禁止移动！")
                 elif key2 == b'P':  # 下
                     new_y = y - step_xy
-                    if 200 < x < 400 and -200 < new_y < 86:
+                    if 200 < x < 400 and -200 < new_y < 90:
                         print("下 (y-1)")
                         move.RelMovL(0, -step_xy, 0, 0)
                     else:
                         print("超出限位，禁止移动！")
                 elif key2 == b'K':  # 左
                     new_x = x - step_xy
-                    if 200 < new_x < 400 and -200 < y < 86:
+                    if 200 < new_x < 400 and -200 < y < 90:
                         print("左 (x-1)")
                         move.RelMovL(-step_xy, 0, 0, 0)
                     else:
                         print("超出限位，禁止移动！")
                 elif key2 == b'M':  # 右
                     new_x = x + step_xy
-                    if 200 < new_x < 400 and -200 < y < 86:
+                    if 200 < new_x < 400 and -200 < y < 90:
                         print("右 (x+1)")
                         move.RelMovL(step_xy, 0, 0, 0)
                     else:

@@ -1,19 +1,14 @@
 import gradio as gr
-import whisper
-import sys
-import time
-import threading
 from connect import ConnectRobot
-import re
+from control import move_robot
+from Whispertest import transcribe_full, transcribe_keywords
+from command_parser import execute_motion
+from llm_api import llm_chat
+from grab_api import grab_by_name, coco_categories
+from yolo_stream import YOLOStream
 
-try:
-    import msvcrt  # Windows下用于捕获键盘输入
-except ImportError:
-    print("本脚本仅支持Windows平台。")
-    sys.exit(1)
-
-# 加载本地模型
-model = whisper.load_model(r"F:\KeChaung\whisper\small.pt")
+# 初始化全局YOLOStream实例
+yolo_stream = YOLOStream()
 
 # 机械臂连接
 try:
@@ -22,170 +17,100 @@ except Exception as e:
     dashboard = move = feed = None
     print(f"机械臂连接失败: {e}")
 
-# 机械臂限位
-X_MIN, X_MAX = 200, 400
-Y_MIN, Y_MAX = -200, 90
-STEP_XY = 10
-STEP_R = 5
+# COCO类别中英文列表
+COCO_NAMES = [
+    "人", "自行车", "汽车", "摩托车", "飞机", "公共汽车", "火车", "卡车", "船", "交通灯", "消防栓", "停车标志", "停车计费器", "长凳", "鸟", "猫", "狗", "马", "绵羊", "牛", "大象", "熊", "斑马", "长颈鹿", "背包", "雨伞", "手提包", "领带", "行李箱", "飞盘", "滑雪板", "雪橇", "运动球", "风筝", "棒球棒", "棒球手套", "滑板", "冲浪板", "网球拍", "瓶子", "酒杯", "杯子", "叉子", "刀", "勺子", "碗", "香蕉", "苹果", "三明治", "橙子", "西兰花", "胡萝卜", "热狗", "披萨", "甜甜圈", "蛋糕", "椅子", "沙发", "盆栽植物", "床", "餐桌", "马桶", "电视", "笔记本电脑", "鼠标", "遥控器", "键盘", "手机", "微波炉", "烤箱", "烤面包机", "水槽", "冰箱", "书", "时钟", "花瓶", "剪刀", "泰迪熊", "吹风机", "牙刷",
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+]
 
-# 获取当前位姿
-def get_pose():
-    pose_str = dashboard.GetPose()
-    try:
-        match = re.search(r"\{([^}]*)\}", pose_str)
-        if not match:
-            raise ValueError("未找到内容")
-        pose_data = match.group(1)
-        x, y, z, r = [float(v) for v in pose_data.split(',')[:4]]
-        return x, y, z, r
-    except Exception as e:
-        return None
+# 获取当前YOLO检测到的所有英文类别名
+def get_yolo_detected_names(yolo_stream):
+    frame = yolo_stream.get_frame(width=2592, height=1944)
+    if frame is None:
+        return []
+    from ultralytics import YOLO
+    import torch
+    model = YOLO(r'F:\KeChaung\yolo_pth\yolov8m.pt')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model.to(device)
+    results = model(frame, device=device, verbose=False)
+    detected = set()
+    for res in results:
+        for box in res.boxes:
+            class_id = int(box.cls[0])
+            class_name_en = res.names[class_id] if hasattr(res, 'names') else str(class_id)
+            class_name_cn = coco_categories.get(class_id, class_name_en)
+            detected.add(class_name_en.strip().lower())
+            detected.add(str(class_name_cn).strip().lower())
+    return list(detected)
 
-# 机械臂控制函数
+# 智能抓取prompt
+SMART_PROMPT = (
+    "你是一个机械臂助手。当前画面可抓取的物体有：{detected_str}。"
+    "用户如果说'帮我拿一下xxx'、'抓取xxx'等指令时，请优先从可抓取物体中选择最合适的一个，并只回复物体名称（如'banana'），不要回复其它内容。"
+    "如果没有可抓取的物体或用户请求的物体不在可抓取列表中，请回复'当前画面没有可抓取的目标'。"
+)
 
-def move_robot(direction):
-    if move is None or dashboard is None:
-        return "机械臂未连接"
-    pose = get_pose()
-    if pose is None:
-        return "获取位姿失败"
-    x, y, z, r = pose
-    # 限位判断
-    if not (X_MIN < x < X_MAX and Y_MIN < y < Y_MAX):
-        # 只允许回安全区方向移动
-        if direction == 'up' and y < Y_MIN:
-            move.RelMovL(0, STEP_XY, 0, 0)
-            return "上 (y+10)"
-        elif direction == 'down' and y > Y_MAX:
-            move.RelMovL(0, -STEP_XY, 0, 0)
-            return "下 (y-10)"
-        elif direction == 'left' and x > X_MAX:
-            move.RelMovL(-STEP_XY, 0, 0, 0)
-            return "左 (x-10)"
-        elif direction == 'right' and x < X_MIN:
-            move.RelMovL(STEP_XY, 0, 0, 0)
-            return "右 (x+10)"
-        else:
-            return "当前位置已超限，只允许回安全区方向移动！"
-    # 正常限位内
-    if direction == 'up':
-        if Y_MIN < y + STEP_XY < Y_MAX:
-            move.RelMovL(0, STEP_XY, 0, 0)
-            return "上 (y+10)"
-        else:
-            return "超出限位，禁止移动！"
-    elif direction == 'down':
-        if Y_MIN < y - STEP_XY < Y_MAX:
-            move.RelMovL(0, -STEP_XY, 0, 0)
-            return "下 (y-10)"
-        else:
-            return "超出限位，禁止移动！"
-    elif direction == 'left':
-        if X_MIN < x - STEP_XY < X_MAX:
-            move.RelMovL(-STEP_XY, 0, 0, 0)
-            return "左 (x-10)"
-        else:
-            return "超出限位，禁止移动！"
-    elif direction == 'right':
-        if X_MIN < x + STEP_XY < X_MAX:
-            move.RelMovL(STEP_XY, 0, 0, 0)
-            return "右 (x+10)"
-        else:
-            return "超出限位，禁止移动！"
-    elif direction == 'r+':
-        move.RelMovJ(0, 0, 0, STEP_R)
-        return "r+1"
-    elif direction == 'r-':
-        move.RelMovJ(0, 0, 0, -STEP_R)
-        return "r-1"
+def is_coco_name(text):
+    return text.strip() in COCO_NAMES
+
+# 语音对话主逻辑（大模型对话，完整文本）
+def voice_to_llm(audio, history):
+    user_text = transcribe_full(audio)
+    if not user_text or user_text == "请录音":
+        return history, "未识别到语音"
+    detected_names = get_yolo_detected_names(yolo_stream)
+    detected_str = ", ".join(detected_names) if detected_names else "无"
+    system_prompt = SMART_PROMPT.format(detected_str=detected_str)
+    messages = []
+    for msg in history:
+        if isinstance(msg, dict):
+            messages.append(msg)
+    messages.append({"role": "user", "content": user_text})
+    bot_reply = llm_chat(messages, system_prompt=system_prompt)
+    reply_norm = bot_reply.strip().lower()
+    if reply_norm in detected_names:
+        grab_result = grab_by_name(bot_reply, yolo_stream=yolo_stream)
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": f"[抓取]{bot_reply}\n{grab_result}"})
+        return history, grab_result
+    elif reply_norm == "当前画面没有可抓取的目标":
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": bot_reply})
+        return history, "当前画面没有可抓取的目标"
     else:
-        return "未知指令"
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": bot_reply})
+        return history, ""
 
-# 中文数字转阿拉伯数字
-def chinese_to_arabic(text):
-    zh2ar = {
-        "零": "0", "一": "1", "二": "2", "两": "2", "三": "3", "四": "4", "五": "5",
-        "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"
-    }
-    # 只处理十以内的单个数字
-    for zh, ar in zh2ar.items():
-        text = re.sub(zh, ar, text)
-    return text
+# 打字输入对话逻辑
+def text_to_llm(user_text, history):
+    if not user_text:
+        return history, "请输入内容"
+    detected_names = get_yolo_detected_names(yolo_stream)
+    detected_str = ", ".join(detected_names) if detected_names else "无"
+    system_prompt = SMART_PROMPT.format(detected_str=detected_str)
+    messages = []
+    for msg in history:
+        if isinstance(msg, dict):
+            messages.append(msg)
+    messages.append({"role": "user", "content": user_text})
+    bot_reply = llm_chat(messages, system_prompt=system_prompt)
+    reply_norm = bot_reply.strip().lower()
+    if reply_norm in detected_names:
+        grab_result = grab_by_name(bot_reply, yolo_stream=yolo_stream)
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": f"[抓取]{bot_reply}\n{grab_result}"})
+        return history, grab_result
+    elif reply_norm == "当前画面没有可抓取的目标":
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": bot_reply})
+        return history, "当前画面没有可抓取的目标"
+    else:
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": bot_reply})
+        return history, ""
 
-# 语音识别（仅筛选并显示指令，不执行）
-def transcribe(audio):
-    if audio is None:
-        return "请录音"
-    result = model.transcribe(audio)
-    text = result["text"]
-    text = chinese_to_arabic(text)
-    # 支持"向上3步""往左2步"等表达
-    directions = ["上", "下", "左", "右", "R\+", "R-", "r\+", "r-"]
-    units = ["步", "度", "格", "step", "degree"]
-    # 新增前缀"向""往"可选
-    pattern = r"((?:向|往)?(?P<dir>" + "|".join(directions) + r")(?:\s*(?P<num>\d+))?(?:\s*(?P<unit>" + "|".join(units) + r"))?)"
-    matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
-    filtered = " ".join([m.group(0) for m in matches if m.group(0)])
-    if not filtered:
-        pattern2 = r"((?:向|往)?(?P<dir>" + "|".join(directions) + r")(?:\s*(?P<num>\d+))?)"
-        matches = list(re.finditer(pattern2, text, flags=re.IGNORECASE))
-        filtered = " ".join([m.group(0) for m in matches if m.group(0)])
-    with open("last_result.txt", "w", encoding="utf-8") as f:
-        f.write(filtered)
-    return filtered if filtered else "未检测到运动指令"
-
-# 新增：解析并执行运动指令（从文本框内容）
-def execute_motion(filtered):
-    import re
-    filtered = chinese_to_arabic(filtered)
-    directions = ["上", "下", "左", "右", "R\+", "R-", "r\+", "r-"]
-    units = ["步", "度", "格", "step", "degree"]
-    pattern = r"((?:向|往)?(?P<dir>" + "|".join(directions) + r")(?:\s*(?P<num>\d+))?(?:\s*(?P<unit>" + "|".join(units) + r"))?)"
-    matches = list(re.finditer(pattern, filtered, flags=re.IGNORECASE))
-    if not matches:
-        pattern2 = r"((?:向|往)?(?P<dir>" + "|".join(directions) + r")(?:\s*(?P<num>\d+))?)"
-        matches = list(re.finditer(pattern2, filtered, flags=re.IGNORECASE))
-    if matches:
-        feedbacks = []
-        for m in matches:
-            cmd = m.group(0)
-            dir_word = m.group('dir')
-            num = m.group('num')
-            if re.search(r"上", dir_word, re.IGNORECASE):
-                direction = 'up'
-            elif re.search(r"下", dir_word, re.IGNORECASE):
-                direction = 'down'
-            elif re.search(r"左", dir_word, re.IGNORECASE):
-                direction = 'left'
-            elif re.search(r"右", dir_word, re.IGNORECASE):
-                direction = 'right'
-            elif re.search(r"R\+|r\+", dir_word, re.IGNORECASE):
-                direction = 'r+'
-            elif re.search(r"R-|r-", dir_word, re.IGNORECASE):
-                direction = 'r-'
-            else:
-                direction = None
-            count = int(num) if num else 1
-            step = 10
-            if direction:
-                global STEP_XY, STEP_R
-                old_step_xy, old_step_r = STEP_XY, STEP_R
-                if direction in ['up', 'down', 'left', 'right']:
-                    STEP_XY = step
-                else:
-                    STEP_R = step
-                for i in range(count):
-                    result = move_robot(direction)
-                    feedbacks.append(f"{cmd} 第{i+1}次: {result}")
-                    if "超出限位" in result or "只允许回安全区方向移动" in result or "未连接" in result or "获取位姿失败" in result:
-                        break
-                STEP_XY, STEP_R = old_step_xy, old_step_r
-            else:
-                feedbacks.append(f"识别到: {cmd}，但未能解析方向")
-        return "\n".join(feedbacks)
-    return "未检测到运动指令"
-
-# Gradio界面
 with gr.Blocks() as demo:
     gr.Markdown("# GUI")
     with gr.Row():
@@ -209,18 +134,28 @@ with gr.Blocks() as demo:
             exec_out = gr.Textbox(label="执行结果")
         with gr.Column():
             status_box = gr.Textbox(label="机械臂状态", value="等待操作...", interactive=False)
+            gr.Markdown("## YOLO目标检测实时画面")
+            gr.HTML('<img src="http://localhost:5001/video_feed" width="640" height="480" />')
+            gr.Markdown("## 大模型多轮对话")
+            chatbot = gr.Chatbot(label="对话历史", type="messages")
+            with gr.Row():
+                audio_chat = gr.Audio(type="filepath", label="语音输入")
+                talk_btn = gr.Button("语音对话")
+            with gr.Row():
+                text_input = gr.Textbox(label="打字输入")
+                send_btn = gr.Button("发送")
+            chat_status = gr.Textbox(label="对话状态", interactive=False)
+            talk_btn.click(voice_to_llm, inputs=[audio_chat, chatbot], outputs=[chatbot, chat_status])
+            send_btn.click(text_to_llm, inputs=[text_input, chatbot], outputs=[chatbot, chat_status])
 
-    # 机械臂控制按钮事件
-    up_btn.click(lambda: move_robot('up'), outputs=status_box)
-    down_btn.click(lambda: move_robot('down'), outputs=status_box)
-    left_btn.click(lambda: move_robot('left'), outputs=status_box)
-    right_btn.click(lambda: move_robot('right'), outputs=status_box)
-    rplus_btn.click(lambda: move_robot('r+'), outputs=status_box)
-    rminus_btn.click(lambda: move_robot('r-'), outputs=status_box)
+    up_btn.click(lambda: move_robot('up', dashboard, move), outputs=status_box)
+    down_btn.click(lambda: move_robot('down', dashboard, move), outputs=status_box)
+    left_btn.click(lambda: move_robot('left', dashboard, move), outputs=status_box)
+    right_btn.click(lambda: move_robot('right', dashboard, move), outputs=status_box)
+    rplus_btn.click(lambda: move_robot('r+', dashboard, move), outputs=status_box)
+    rminus_btn.click(lambda: move_robot('r-', dashboard, move), outputs=status_box)
 
-    # 语音识别按钮事件（只识别并筛选，不执行）
-    recog_btn.click(transcribe, inputs=audio_in, outputs=recog_out)
-    # 执行按钮事件（从文本框内容执行）
-    exec_btn.click(execute_motion, inputs=recog_out, outputs=exec_out)
+    recog_btn.click(transcribe_keywords, inputs=audio_in, outputs=recog_out)
+    exec_btn.click(lambda filtered: execute_motion(filtered, dashboard, move), inputs=recog_out, outputs=exec_out)
 
 demo.launch()

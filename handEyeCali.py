@@ -51,8 +51,4 @@ def useAffineMat(aff_m, x_camera, y_camera):
     robot_y = (aff_m[1][0] * x_camera) + (aff_m[1][1] * y_camera) + aff_m[1][2]
     return robot_x, robot_y
 
-# 测试代码
-aff_m=handEyeCalibration(r'biaodingXML\250617.xml')
-test_point = useAffineMat(  aff_m,1137, 724)  # 使用第一个标定点测试
-print(f"转换后的机器人坐标: {test_point}")
 
