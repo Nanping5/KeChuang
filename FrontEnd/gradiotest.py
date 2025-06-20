@@ -100,6 +100,8 @@ def grab_by_name_from_detection(target_name):
                 move.Sync()
                 dashboard.DOExecute(1, 1)
                 time.sleep(1)
+                move.MovJ(robot_x, robot_y, 58, 0)
+                move.Sync()
                 move.MovJ(197, -250, 58, 0)
                 move.Sync()
                 dashboard.DOExecute(1, 0)
@@ -198,14 +200,15 @@ def text_to_llm(user_text, history):
         history.append({"role": "assistant", "content": bot_reply})
         return history, ""
 
-with gr.Blocks(theme=gr.themes.Soft(), css=".gradio-container {background: #f7f9fa;} .gr-button {margin: 2px 4px;} .gr-textbox {margin-bottom: 8px;}") as demo:
+with gr.Blocks(theme=gr.themes.Default(), css=".gradio-container {background: #f7f9fa;} .gr-button {margin: 2px 2px;} .gr-textbox {margin-bottom: 6px;} .gr-column {min-width: 200px; max-width: 520px;} .gr-row {flex-wrap: wrap;} .gradio-container {overflow-y: auto; max-height: 98vh;}") as demo:
     gr.Markdown("""
-    <h1 style='text-align:center; color:#2d3a4b;'>GUI</h1>
-    <hr style='margin-bottom: 10px;'>
+    <h2 style='text-align:center; color:#2d3a4b; margin-bottom:8px;'>GUI</h2>
+    <hr style='margin-bottom: 8px;'>
     """)
     with gr.Row():
-        with gr.Column(scale=1, min_width=250):
-            gr.Markdown("<h3 style='color:#3b5998;'>机械臂方向/旋转控制</h3>")
+        # 左栏：机械臂控制、语音识别、状态
+        with gr.Column(scale=1, min_width=180, elem_id="left-col"):
+            gr.Markdown("<h4 style='color:#3b5998;'>机械臂方向/旋转控制</h4>")
             with gr.Row():
                 up_btn = gr.Button("↑", elem_id="up-btn")
             with gr.Row():
@@ -216,30 +219,38 @@ with gr.Blocks(theme=gr.themes.Soft(), css=".gradio-container {background: #f7f9
             with gr.Row():
                 rplus_btn = gr.Button("R+", elem_id="rplus-btn")
                 rminus_btn = gr.Button("R-", elem_id="rminus-btn")
-            gr.Markdown("<hr style='margin:10px 0;'>")
-            gr.Markdown("<h3 style='color:#3b5998;'>语音转文字（Whisper）</h3>")
+            gr.Markdown("<hr style='margin:8px 0;'>")
+            gr.Markdown("<h4 style='color:#3b5998;'>语音转文字（Whisper）</h4>")
             audio_in = gr.Audio(type="filepath", label="请录音或上传音频", elem_id="audio-in")
             with gr.Row():
                 recog_btn = gr.Button("识别音频", elem_id="recog-btn")
                 exec_btn = gr.Button("执行指令", elem_id="exec-btn")
             recog_out = gr.Textbox(label="筛选后指令", interactive=True, elem_id="recog-out")
             exec_out = gr.Textbox(label="执行结果", elem_id="exec-out")
-            gr.Markdown("<hr style='margin:10px 0;'>")
+
+        # 中栏：视频流
+        with gr.Column(scale=1, min_width=240, elem_id="center-col"):
+            gr.Markdown("<h4 style='color:#3b5998;'>实时画面</h4>")
+            gr.HTML('<div style="display:flex; justify-content:center;"><img src="http://localhost:5001/video_feed_thumb" width="480" height="360" style="border-radius:8px; box-shadow:0 2px 8px #ccc;" /></div>')
+            gr.Markdown("<hr style='margin:8px 0;'>")
+            gr.Markdown("<h4 style='color:#3b5998;'>大模型对话</h4>")
+            chatbot = gr.Chatbot(label="对话历史", type="messages", elem_id="chatbot", height=220)
+            gr.Markdown("<hr style='margin:8px 0;'>")
             status_box = gr.Textbox(label="机械臂状态", value="等待操作...", interactive=False, elem_id="status-box")
-        with gr.Column(scale=2, min_width=400):
-            gr.Markdown("<h3 style='color:#3b5998;'>实时画面</h3>")
-            gr.HTML('<div style="display:flex; justify-content:center;"><img src="http://localhost:5001/video_feed_thumb" width="640" height="480" style="border-radius:8px; box-shadow:0 2px 8px #ccc;" /></div>')
-            gr.Markdown("<hr style='margin:10px 0;'>")
-            gr.Markdown("<h3 style='color:#3b5998;'>大模型对话</h3>")
-            chatbot = gr.Chatbot(label="对话历史", type="messages", elem_id="chatbot")
+        # 右栏：大模型对话
+        with gr.Column(scale=1, min_width=200, elem_id="right-col"):
+
+            gr.Markdown("<hr style='margin:8px 0;'>")
+            gr.Markdown("<b>语音输入</b>")
             with gr.Row():
                 audio_chat = gr.Audio(type="filepath", label="语音输入", elem_id="audio-chat")
                 talk_btn = gr.Button("语音识别", elem_id="talk-btn")
+            gr.Markdown("<b>输入</b>")
             with gr.Row():
                 text_input = gr.Textbox(label="输入", elem_id="text-input")
                 send_btn = gr.Button("发送", elem_id="send-btn")
             chat_status = gr.Textbox(label="对话状态", interactive=False, elem_id="chat-status")
-            gr.Markdown("<hr style='margin:10px 0;'>")
+            gr.Markdown("<hr style='margin:8px 0;'>")
     # 按钮事件绑定
     up_btn.click(lambda: move_robot('up', dashboard, move), outputs=status_box)
     down_btn.click(lambda: move_robot('down', dashboard, move), outputs=status_box)

@@ -26,23 +26,14 @@ class YOLOStream:
         while self.running:
             ret, frame = self.cap.read()
             if not ret:
-                print("未获取到摄像头画面")
                 continue
-            results = self.model(frame, device=self.device, verbose=False)
-            annotated = frame.copy()
-            for res in results:
-                for box in res.boxes:
-                    xyxy = box.xyxy.squeeze().tolist()
-                    x1, y1, x2, y2 = map(int, xyxy)
-                    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                    class_id = int(box.cls[0])
-                    class_name = res.names[class_id] if hasattr(res, 'names') else str(class_id)
-                    cv2.putText(annotated, f'{class_name} {box.conf[0]:.2f}', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            self.frame = annotated
+            # 只保存原始帧
+            self.frame = frame
 
     def get_frame(self, width=640, height=480):
         if self.frame is None:
             return None
+        # 返回原始帧，不画框
         rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
         rgb = cv2.resize(rgb, (int(width), int(height)))
         return rgb

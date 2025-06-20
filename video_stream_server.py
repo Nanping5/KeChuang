@@ -22,7 +22,7 @@ def yolo_detect_loop():
         if frame is None:
             time.sleep(0.05)
             continue
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = yolo_stream.model(frame, device=yolo_stream.device, verbose=False)
         boxes = []
         for res in results:
