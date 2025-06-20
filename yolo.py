@@ -33,7 +33,7 @@ else:
     log("未检测到GPU，使用CPU")
 
 # 初始化
-aff_m = handEyeCalibration(r'biaodingXML\\250617.xml')
+aff_m = handEyeCalibration(r'biaodingXML\\250620.xml')
 
 # 连接机械臂
 try:

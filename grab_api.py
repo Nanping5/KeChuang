@@ -20,29 +20,30 @@ coco_categories = {
 model = YOLO(r'F:\KeChaung\yolo_pth\yolov8m.pt')
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model.to(device)
-aff_m = handEyeCalibration(r'F:\KeChaung\biaodingXML\250617.xml')
+aff_m = handEyeCalibration(r'F:\KeChaung\biaodingXML\250620.xml')
 
-def grab_by_name(target_name: str, yolo_stream=None):
+def grab_by_name(target_name: str, yolo_stream=None, frame=None):
     """
-    传入目标名称（中英文均可），检测yolo_stream最新画面，若有匹配则抓取。
-    yolo_stream: 必须传入YOLOStream实例。
-    返回: str, 抓取结果描述
+    传入目标名称（中英文均可），检测yolo_stream最新画面或frame，若有匹配则抓取。
+    yolo_stream: 可选YOLOStream实例。
+    frame: 可选OpenCV图像帧。
+    返回: dict, 包含抓取结果、类别名、像素中心、机械臂坐标等
     """
-    if yolo_stream is None:
-        return "未传入YOLOStream实例，无法获取摄像头画面"
-    # 获取原始分辨率帧
-    frame = yolo_stream.get_frame(width=2592, height=1944)
-    if frame is None:
-        return "没有可用画面"
-    # 检测
-    results = model(frame, device=device, verbose=False)
+    if frame is not None:
+        input_frame = frame
+    elif yolo_stream is not None:
+        input_frame = yolo_stream.get_frame(width=2592, height=1944)
+        if input_frame is None:
+            return {"result": "没有可用画面"}
+    else:
+        return {"result": "未传入YOLOStream实例或frame，无法获取摄像头画面"}
+    results = model(input_frame, device=device, verbose=False)
     found = False
     for res in results:
         for box in res.boxes:
             class_id = int(box.cls[0])
             class_name_en = res.names[class_id] if hasattr(res, 'names') else str(class_id)
             class_name_cn = coco_categories.get(class_id, class_name_en)
-            # 中英文全等匹配
             if target_name == class_name_en or target_name == class_name_cn:
                 found = True
                 xyxy = box.xyxy.squeeze().tolist()
@@ -54,22 +55,26 @@ def grab_by_name(target_name: str, yolo_stream=None):
                 robot_r = 0
                 try:
                     dashboard, move, feed = ConnectRobot()
-                    # 1. 移动到目标
                     result = move.MovJ(robot_x, robot_y, robot_z, robot_r)
                     move.Sync()
-                    # 2. 吸气
                     dashboard.DOExecute(1, 1)
                     time.sleep(1)
-                    # 3. 移动到复位
                     move.MovJ(197, -250, 58, 0)
                     move.Sync()
-                    # 4. 释放
                     dashboard.DOExecute(1, 0)
                     dashboard.DOExecute(2, 1)
                     time.sleep(0.5)
                     dashboard.DOExecute(2, 0)
-                    return f"成功抓取: {class_name_cn} ({class_name_en})"
+                    return {
+                        "result": f"成功抓取: {class_name_cn} ({class_name_en})",
+                        "class_name_cn": class_name_cn,
+                        "class_name_en": class_name_en,
+                        "center_x": center_x,
+                        "center_y": center_y,
+                        "robot_x": robot_x,
+                        "robot_y": robot_y
+                    }
                 except Exception as e:
-                    return f"机械臂抓取失败: {e}"
+                    return {"result": f"机械臂抓取失败: {e}"}
     if not found:
-        return f"未检测到目标: {target_name}" 
+        return {"result": f"未检测到目标: {target_name}"} 

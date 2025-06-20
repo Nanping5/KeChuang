@@ -6,6 +6,10 @@ import torch
 class YOLOStream:
     def __init__(self, camera_index=0, width=2592, height=1944):
         self.cap = cv2.VideoCapture(camera_index)
+        if not self.cap.isOpened():
+            print(f"摄像头 {camera_index} 打开失败！")
+        else:
+            print(f"摄像头 {camera_index} 打开成功！")
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -22,6 +26,7 @@ class YOLOStream:
         while self.running:
             ret, frame = self.cap.read()
             if not ret:
+                print("未获取到摄像头画面")
                 continue
             results = self.model(frame, device=self.device, verbose=False)
             annotated = frame.copy()
