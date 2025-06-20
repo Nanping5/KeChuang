@@ -38,7 +38,7 @@ def yolo_detect_loop():
                     "class_name": class_name,
                     "conf": conf
                 })
-        print("后端检测到类别：", [b["class_name"] for b in boxes])
+        print("检测到类别：", [b["class_name"] for b in boxes])
         with detection_lock:
             latest_detection = {
                 "boxes": boxes,
